@@ -1,7 +1,21 @@
 
-import 'package:flutter/material.dart';
+import 'dart:math';
 
-void main() {
+import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'firebase_options.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
+  await FirebaseAuth.instance.signInAnonymously();
+
   runApp(const SyncPlayApp());
 }
 
@@ -34,6 +48,113 @@ class SyncPlayApp extends StatelessWidget {
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
 
+  String _generateRoomCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    final random = Random.secure();
+
+    return List.generate(
+      6,
+      (_) => chars[random.nextInt(chars.length)],
+    ).join();
+  }
+
+  Future<String> _createRoom() async {
+    final user = FirebaseAuth.instance.currentUser;
+
+    if (user == null) {
+      throw Exception('You are not signed in. Please restart the app.');
+    }
+
+    final rooms = FirebaseFirestore.instance.collection('rooms');
+
+    // Retry if a generated code is already in use.
+    for (var attempt = 0; attempt < 5; attempt++) {
+      final code = _generateRoomCode();
+      final roomRef = rooms.doc(code);
+
+      final created = await FirebaseFirestore.instance.runTransaction(
+        (transaction) async {
+          final existing = await transaction.get(roomRef);
+
+          if (existing.exists) return false;
+
+          transaction.set(roomRef, {
+            'creatorUid': user.uid,
+            'createdAt': FieldValue.serverTimestamp(),
+            'status': 'active',
+          });
+
+          return true;
+        },
+      );
+
+      if (created) return code;
+    }
+
+    throw Exception('Could not generate a room code. Try again.');
+  }
+
+  Future<void> _handleCreateRoom(BuildContext context) async {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: CircularProgressIndicator(color: accentColor),
+      ),
+    );
+
+    try {
+      final code = await _createRoom();
+
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          backgroundColor: cardColor,
+          title: const Text('Your listening room is ready!'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Share this code with your friends:'),
+              const SizedBox(height: 18),
+              SelectableText(
+                code,
+                style: const TextStyle(
+                  color: accentColor,
+                  fontSize: 32,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 5,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text(
+                'Done',
+                style: TextStyle(color: accentColor),
+              ),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (!context.mounted) return;
+
+      Navigator.of(context, rootNavigator: true).pop();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not create room: $error'),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -44,8 +165,6 @@ class HomeScreen extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const SizedBox(height: 12),
-
-              // App branding
               Row(
                 children: [
                   Container(
@@ -77,9 +196,7 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ],
               ),
-
               const SizedBox(height: 42),
-
               const Text(
                 'MUSIC IS BETTER',
                 style: TextStyle(
@@ -109,23 +226,12 @@ class HomeScreen extends StatelessWidget {
                   height: 1.6,
                 ),
               ),
-
               const SizedBox(height: 30),
-
-              // Create room button
               SizedBox(
                 width: double.infinity,
                 height: 58,
                 child: FilledButton.icon(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'Room creation is coming in the next step!',
-                        ),
-                      ),
-                    );
-                  },
+                  onPressed: () => _handleCreateRoom(context),
                   style: FilledButton.styleFrom(
                     backgroundColor: accentColor,
                     foregroundColor: bgColor,
@@ -143,10 +249,7 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
               ),
-
               const SizedBox(height: 14),
-
-              // Join room button
               SizedBox(
                 width: double.infinity,
                 height: 58,
@@ -177,9 +280,7 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
               ),
-
               const SizedBox(height: 36),
-
               const Text(
                 'THE EXPERIENCE',
                 style: TextStyle(
@@ -189,32 +290,25 @@ class HomeScreen extends StatelessWidget {
                   letterSpacing: 2,
                 ),
               ),
-
               const SizedBox(height: 16),
-
               const FeatureCard(
                 icon: Icons.music_note_rounded,
                 title: 'Listen together',
-                description:
-                    'Enjoy music with friends in a shared room.',
+                description: 'Enjoy music with friends in a shared room.',
               ),
               const SizedBox(height: 12),
               const FeatureCard(
                 icon: Icons.sync_rounded,
                 title: 'Stay in sync',
-                description:
-                    'Keep playback coordinated across the room.',
+                description: 'Keep playback coordinated across the room.',
               ),
               const SizedBox(height: 12),
               const FeatureCard(
                 icon: Icons.people_alt_rounded,
                 title: 'Your people, your room',
-                description:
-                    'Create a room and invite friends to join.',
+                description: 'Create a room and invite friends to join.',
               ),
-
               const SizedBox(height: 28),
-
               const Center(
                 child: Text(
                   'MADE FOR SHARED MOMENTS',
@@ -225,7 +319,6 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
               ),
-
               const SizedBox(height: 12),
             ],
           ),
@@ -264,11 +357,7 @@ class FeatureCard extends StatelessWidget {
               color: accentColor.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(14),
             ),
-            child: Icon(
-              icon,
-              color: accentColor,
-              size: 25,
-            ),
+            child: Icon(icon, color: accentColor, size: 25),
           ),
           const SizedBox(width: 16),
           Expanded(

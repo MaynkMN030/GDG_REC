@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1020704680112",
+    "project_id": "syncplay-735af",
+    "storage_bucket": "syncplay-735af.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1020704680112:android:3720d7003f5be4cfa83375",
+        "android_client_info": {
+          "package_name": "com.example.syncplay"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDVIaP6OU83X4SY_yBT9yj1B6klp5HOxqE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
