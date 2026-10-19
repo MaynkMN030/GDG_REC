@@ -1,18 +1,20 @@
-
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+
+import 'dart:async';
+
+import 'package:just_audio/just_audio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'firebase_options.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   await FirebaseAuth.instance.signInAnonymously();
 
@@ -52,10 +54,7 @@ class HomeScreen extends StatelessWidget {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     final random = Random.secure();
 
-    return List.generate(
-      6,
-      (_) => chars[random.nextInt(chars.length)],
-    ).join();
+    return List.generate(6, (_) => chars[random.nextInt(chars.length)]).join();
   }
 
   Future<String> _createRoom() async {
@@ -104,9 +103,8 @@ class HomeScreen extends StatelessWidget {
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(
-        child: CircularProgressIndicator(color: accentColor),
-      ),
+      builder: (_) =>
+          const Center(child: CircularProgressIndicator(color: accentColor)),
     );
 
     try {
@@ -115,11 +113,8 @@ class HomeScreen extends StatelessWidget {
       if (!context.mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
 
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => RoomScreen(roomCode: code),
-        ),
-      );
+      Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => RoomScreen(roomCode: code)));
     } catch (error) {
       if (!context.mounted) return;
 
@@ -196,9 +191,8 @@ class HomeScreen extends StatelessWidget {
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(
-        child: CircularProgressIndicator(color: accentColor),
-      ),
+      builder: (_) =>
+          const Center(child: CircularProgressIndicator(color: accentColor)),
     );
 
     try {
@@ -211,8 +205,7 @@ class HomeScreen extends StatelessWidget {
       final roomRef = db.collection('rooms').doc(code);
       final roomSnapshot = await roomRef.get();
 
-      if (!roomSnapshot.exists ||
-          roomSnapshot.data()?['status'] != 'active') {
+      if (!roomSnapshot.exists || roomSnapshot.data()?['status'] != 'active') {
         throw Exception('Room not found or no longer active.');
       }
 
@@ -229,11 +222,8 @@ class HomeScreen extends StatelessWidget {
       if (!context.mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
 
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => RoomScreen(roomCode: code),
-        ),
-      );
+      Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => RoomScreen(roomCode: code)));
     } catch (error) {
       if (!context.mounted) return;
 
@@ -335,10 +325,7 @@ class HomeScreen extends StatelessWidget {
                   icon: const Icon(Icons.add_circle_outline_rounded),
                   label: const Text(
                     'Create a listening room',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                   ),
                 ),
               ),
@@ -358,10 +345,7 @@ class HomeScreen extends StatelessWidget {
                   icon: const Icon(Icons.login_rounded),
                   label: const Text(
                     'Join a room',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                   ),
                 ),
               ),
@@ -413,19 +397,275 @@ class HomeScreen extends StatelessWidget {
   }
 }
 
-class RoomScreen extends StatelessWidget {
+class RoomScreen extends StatefulWidget {
   final String roomCode;
 
-  const RoomScreen({
-    super.key,
-    required this.roomCode,
-  });
+  const RoomScreen({super.key, required this.roomCode});
+
+  @override
+  State<RoomScreen> createState() => _RoomScreenState();
+}
+
+class _RoomScreenState extends State<RoomScreen> {
+  final AudioPlayer _player = AudioPlayer();
+
+  late final DocumentReference<Map<String, dynamic>> _roomRef;
+  late final DocumentReference<Map<String, dynamic>> _playbackRef;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+  _playbackSubscription;
+
+  bool _audioReady = false;
+  bool _isApplyingRemoteChange = false;
+  bool _isWritingPlayback = false;
+  String? _audioError;
+
+  Timer? _syncTimer;
+  int _sharedPositionMs = 0;
+  bool _sharedIsPlaying = false;
+  DateTime? _sharedUpdatedAt;
+  bool _hasSharedState = false;
+  bool _isSeeking = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _roomRef = FirebaseFirestore.instance
+        .collection('rooms')
+        .doc(widget.roomCode);
+    _playbackRef = _roomRef.collection('playback').doc('state');
+
+    _loadAudio();
+    _listenForRemotePlayback();
+
+    // Each client corrects its own player against the latest shared timeline.
+    _syncTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _correctPlaybackDrift(),
+    );
+  }
+
+  Future<void> _loadAudio() async {
+    try {
+      await _player.setAsset('assets/audio/demo.mp3');
+
+      if (mounted) {
+        setState(() {
+          _audioReady = true;
+          _audioError = null;
+        });
+
+        // The first Firestore snapshot may arrive before the audio finishes
+        // loading. Apply the cached shared state now that the player is ready.
+        await _applyLatestSharedState();
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _audioError = 'Could not load demo.mp3: $error';
+        });
+      }
+    }
+  }
+
+  void _listenForRemotePlayback() {
+    _playbackSubscription = _playbackRef.snapshots().listen(
+      (snapshot) async {
+        if (!snapshot.exists) return;
+
+        final data = snapshot.data();
+        if (data == null) return;
+
+        final positionMs = data['positionMs'];
+        if (positionMs is! int) return;
+
+        final isPlaying = data['isPlaying'] == true;
+        final updatedAtValue = data['updatedAt'];
+        DateTime? updatedAt;
+        if (updatedAtValue is Timestamp) {
+          updatedAt = updatedAtValue.toDate();
+        }
+
+        _sharedPositionMs = positionMs;
+        _sharedIsPlaying = isPlaying;
+        _sharedUpdatedAt = updatedAt;
+        _hasSharedState = true;
+
+        // Keep the latest state even if the audio is still loading. The
+        // audio-ready callback will apply it after setAsset completes.
+        if (!_audioReady) return;
+
+        final currentUser = FirebaseAuth.instance.currentUser;
+        if (data['updatedBy'] == currentUser?.uid) return;
+
+        await _applyLatestSharedState();
+      },
+      onError: (Object error) {
+        debugPrint('Playback listener error: $error');
+      },
+    );
+  }
+
+  Future<void> _applyLatestSharedState() async {
+    if (!_audioReady || !_hasSharedState) return;
+
+    var targetMs = _sharedPositionMs;
+    if (_sharedIsPlaying && _sharedUpdatedAt != null) {
+      final elapsedMs = DateTime.now()
+          .difference(_sharedUpdatedAt!)
+          .inMilliseconds;
+      if (elapsedMs > 0) targetMs += elapsedMs;
+    }
+
+    final durationMs = _player.duration?.inMilliseconds;
+    if (durationMs != null) {
+      targetMs = targetMs.clamp(0, durationMs).toInt();
+    } else {
+      targetMs = targetMs < 0 ? 0 : targetMs;
+    }
+
+    await _applySharedState(positionMs: targetMs, isPlaying: _sharedIsPlaying);
+  }
+
+  Future<void> _applySharedState({
+    required int positionMs,
+    required bool isPlaying,
+  }) async {
+    if (!_audioReady || _isApplyingRemoteChange) return;
+
+    try {
+      _isApplyingRemoteChange = true;
+      await _player.seek(Duration(milliseconds: positionMs));
+
+      if (isPlaying) {
+        await _player.play();
+      } else {
+        await _player.pause();
+      }
+    } catch (error) {
+      debugPrint('Could not apply remote playback: $error');
+    } finally {
+      _isApplyingRemoteChange = false;
+    }
+  }
+
+  Future<void> _correctPlaybackDrift() async {
+    if (!_audioReady ||
+        !_hasSharedState ||
+        !_sharedIsPlaying ||
+        _isApplyingRemoteChange ||
+        _isSeeking ||
+        _sharedUpdatedAt == null) {
+      return;
+    }
+
+    // Advance the shared position by the time elapsed since the last update.
+    final elapsed = DateTime.now().difference(_sharedUpdatedAt!);
+    final expectedMs = _sharedPositionMs + elapsed.inMilliseconds;
+    final actualMs = _player.position.inMilliseconds;
+
+    // Avoid unnecessary seeks for tiny differences, which can cause audible
+    // glitches. Larger drift is corrected once per timer tick.
+    if ((expectedMs - actualMs).abs() > 1200) {
+      final durationMs = _player.duration?.inMilliseconds;
+      final targetMs = durationMs == null
+          ? expectedMs
+          : expectedMs.clamp(0, durationMs);
+
+      try {
+        _isApplyingRemoteChange = true;
+        await _player.seek(Duration(milliseconds: targetMs));
+      } catch (error) {
+        debugPrint('Drift correction failed: $error');
+      } finally {
+        _isApplyingRemoteChange = false;
+      }
+    }
+  }
+
+  Future<void> _togglePlayback(bool currentlyPlaying) async {
+    if (!_audioReady || _isWritingPlayback || _isApplyingRemoteChange) {
+      return;
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _showMessage('You are not signed in.');
+      return;
+    }
+
+    _isWritingPlayback = true;
+
+    try {
+      final positionMs = _player.position.inMilliseconds.clamp(0, 1 << 31);
+      final nextIsPlaying = !currentlyPlaying;
+
+      // Update our local timeline immediately, then publish it for the room.
+      _sharedPositionMs = positionMs;
+      _sharedIsPlaying = nextIsPlaying;
+      _sharedUpdatedAt = DateTime.now();
+      _hasSharedState = true;
+
+      await _playbackRef.set({
+        'isPlaying': nextIsPlaying,
+        'positionMs': positionMs,
+        'updatedAt': FieldValue.serverTimestamp(),
+        'updatedBy': user.uid,
+      });
+
+      if (nextIsPlaying) {
+        await _player.play();
+      } else {
+        await _player.pause();
+      }
+    } catch (error) {
+      _showMessage('Playback failed: $error');
+    } finally {
+      _isWritingPlayback = false;
+    }
+  }
+
+  Future<void> _publishSeek(Duration position) async {
+    if (!_audioReady) return;
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final positionMs = position.inMilliseconds.clamp(0, 1 << 31);
+    _sharedPositionMs = positionMs;
+    _sharedUpdatedAt = DateTime.now();
+    _hasSharedState = true;
+
+    try {
+      await _playbackRef.set({
+        'isPlaying': _player.playing,
+        'positionMs': positionMs,
+        'updatedAt': FieldValue.serverTimestamp(),
+        'updatedBy': user.uid,
+      });
+    } catch (error) {
+      _showMessage('Could not sync seek: $error');
+    }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  void dispose() {
+    _syncTimer?.cancel();
+    _playbackSubscription?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final db = FirebaseFirestore.instance;
     final user = FirebaseAuth.instance.currentUser;
-    final roomRef = db.collection('rooms').doc(roomCode);
 
     return Scaffold(
       appBar: AppBar(
@@ -434,12 +674,10 @@ class RoomScreen extends StatelessWidget {
       ),
       body: SafeArea(
         child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          stream: roomRef.snapshots(),
+          stream: _roomRef.snapshots(),
           builder: (context, roomSnapshot) {
             if (roomSnapshot.hasError) {
-              return const Center(
-                child: Text('Could not load this room.'),
-              );
+              return const Center(child: Text('Could not load this room.'));
             }
 
             if (!roomSnapshot.hasData) {
@@ -449,6 +687,7 @@ class RoomScreen extends StatelessWidget {
             }
 
             final roomData = roomSnapshot.data!.data();
+
             if (roomData == null) {
               return const Center(child: Text('This room no longer exists.'));
             }
@@ -482,7 +721,7 @@ class RoomScreen extends StatelessWidget {
                 const SizedBox(height: 16),
                 Center(
                   child: SelectableText(
-                    roomCode,
+                    widget.roomCode,
                     style: const TextStyle(
                       color: accentColor,
                       fontSize: 36,
@@ -491,12 +730,181 @@ class RoomScreen extends StatelessWidget {
                     ),
                   ),
                 ),
-                const SizedBox(height: 30),
-                Row(
+                const SizedBox(height: 28),
+
+                // Actual audio player and shared playback controls.
+                StreamBuilder<PlayerState>(
+                  stream: _player.playerStateStream,
+                  builder: (context, playerSnapshot) {
+                    final isPlaying = playerSnapshot.data?.playing ?? false;
+
+                    return Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: cardColor,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: accentColor.withValues(alpha: 0.35),
+                        ),
+                      ),
+                      child: Column(
+                        children: [
+                          const Icon(
+                            Icons.graphic_eq_rounded,
+                            color: accentColor,
+                            size: 34,
+                          ),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'ROOM PLAYBACK',
+                            style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 2,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Demo Track',
+                            style: TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          if (_audioError != null)
+                            Text(
+                              _audioError!,
+                              style: const TextStyle(color: Colors.redAccent),
+                            )
+                          else if (!_audioReady)
+                            const CircularProgressIndicator(color: accentColor)
+                          else
+                            Text(
+                              isPlaying ? 'Playing' : 'Paused',
+                              style: const TextStyle(
+                                color: accentColor,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          const SizedBox(height: 20),
+                          StreamBuilder<Duration>(
+                            stream: _player.positionStream,
+                            builder: (context, positionSnapshot) {
+                              final position =
+                                  positionSnapshot.data ?? Duration.zero;
+                              final duration =
+                                  _player.duration ?? Duration.zero;
+
+                              final maxMs = duration.inMilliseconds;
+                              final valueMs = position.inMilliseconds;
+
+                              return Column(
+                                children: [
+                                  Slider(
+                                    value: maxMs > 0
+                                        ? valueMs.clamp(0, maxMs).toDouble()
+                                        : 0,
+                                    max: maxMs > 0 ? maxMs.toDouble() : 1,
+                                    activeColor: accentColor,
+                                    onChangeStart: !_audioReady || maxMs <= 0
+                                        ? null
+                                        : (_) => _isSeeking = true,
+                                    onChanged: !_audioReady || maxMs <= 0
+                                        ? null
+                                        : (value) {
+                                            _player.seek(
+                                              Duration(
+                                                milliseconds: value.round(),
+                                              ),
+                                            );
+                                          },
+                                    onChangeEnd: !_audioReady || maxMs <= 0
+                                        ? null
+                                        : (value) async {
+                                            final position = Duration(
+                                              milliseconds: value.round(),
+                                            );
+                                            await _player.seek(position);
+                                            _isSeeking = false;
+                                            await _publishSeek(position);
+                                          },
+                                  ),
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        _formatDuration(position),
+                                        style: const TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                      Text(
+                                        _formatDuration(duration),
+                                        style: const TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            height: 52,
+                            child: FilledButton.icon(
+                              onPressed: _audioReady
+                                  ? () => _togglePlayback(isPlaying)
+                                  : null,
+                              style: FilledButton.styleFrom(
+                                backgroundColor: accentColor,
+                                foregroundColor: bgColor,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                              icon: Icon(
+                                isPlaying
+                                    ? Icons.pause_rounded
+                                    : Icons.play_arrow_rounded,
+                              ),
+                              label: Text(
+                                isPlaying ? 'Pause' : 'Play',
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'Everyone in the room can control playback.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white38,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+
+                const SizedBox(height: 28),
+                const Row(
                   children: [
-                    const Icon(Icons.people_alt_rounded, color: accentColor),
-                    const SizedBox(width: 10),
-                    const Expanded(
+                    Icon(Icons.people_alt_rounded, color: accentColor),
+                    SizedBox(width: 10),
+                    Expanded(
                       child: Text(
                         'People in this room',
                         style: TextStyle(
@@ -509,24 +917,20 @@ class RoomScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                  stream: roomRef.collection('members').snapshots(),
+                  stream: _roomRef.collection('members').snapshots(),
                   builder: (context, membersSnapshot) {
                     if (membersSnapshot.hasError) {
                       return const Card(
                         child: Padding(
                           padding: EdgeInsets.all(16),
-                          child: Text(
-                            'Unable to load members. Check your Firestore rules.',
-                          ),
+                          child: Text('Unable to load room members.'),
                         ),
                       );
                     }
 
                     if (!membersSnapshot.hasData) {
                       return const Center(
-                        child: CircularProgressIndicator(
-                          color: accentColor,
-                        ),
+                        child: CircularProgressIndicator(color: accentColor),
                       );
                     }
 
@@ -540,27 +944,28 @@ class RoomScreen extends StatelessWidget {
                       ),
                       child: Column(
                         children: [
-                          for (var i = 0; i < members.length; i++)
+                          for (final member in members)
                             ListTile(
                               leading: CircleAvatar(
-                                backgroundColor:
-                                    accentColor.withValues(alpha: 0.15),
+                                backgroundColor: accentColor.withValues(
+                                  alpha: 0.15,
+                                ),
                                 child: Icon(
-                                  members[i].id == creatorUid
+                                  member.id == creatorUid
                                       ? Icons.star_rounded
                                       : Icons.person_rounded,
                                   color: accentColor,
                                 ),
                               ),
                               title: Text(
-                                members[i].id == user?.uid
+                                member.id == user?.uid
                                     ? 'You'
-                                    : 'Listener ${members[i].id.substring(0, min(6, members[i].id.length))}',
+                                    : 'Listener ${member.id.substring(0, min(6, member.id.length))}',
                               ),
-                              subtitle: members[i].id == creatorUid
+                              subtitle: member.id == creatorUid
                                   ? const Text('Room host')
                                   : null,
-                              trailing: members[i].id == user?.uid
+                              trailing: member.id == user?.uid
                                   ? const Text(
                                       'YOU',
                                       style: TextStyle(
@@ -590,6 +995,12 @@ class RoomScreen extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  String _formatDuration(Duration duration) {
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds.remainder(60);
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 }
 
