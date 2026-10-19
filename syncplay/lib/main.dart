@@ -65,30 +65,36 @@ class HomeScreen extends StatelessWidget {
       throw Exception('You are not signed in. Please restart the app.');
     }
 
-    final rooms = FirebaseFirestore.instance.collection('rooms');
+    final db = FirebaseFirestore.instance;
+    final rooms = db.collection('rooms');
 
-    // Retry if a generated code is already in use.
     for (var attempt = 0; attempt < 5; attempt++) {
       final code = _generateRoomCode();
       final roomRef = rooms.doc(code);
 
-      final created = await FirebaseFirestore.instance.runTransaction(
-        (transaction) async {
-          final existing = await transaction.get(roomRef);
+      final created = await db.runTransaction((transaction) async {
+        final existing = await transaction.get(roomRef);
 
-          if (existing.exists) return false;
+        if (existing.exists) return false;
 
-          transaction.set(roomRef, {
-            'creatorUid': user.uid,
-            'createdAt': FieldValue.serverTimestamp(),
-            'status': 'active',
-          });
+        transaction.set(roomRef, {
+          'creatorUid': user.uid,
+          'createdAt': FieldValue.serverTimestamp(),
+          'status': 'active',
+        });
 
-          return true;
-        },
-      );
+        return true;
+      });
 
-      if (created) return code;
+      if (!created) continue;
+
+      // Register the creator as the first member.
+      await roomRef.collection('members').doc(user.uid).set({
+        'uid': user.uid,
+        'joinedAt': FieldValue.serverTimestamp(),
+      });
+
+      return code;
     }
 
     throw Exception('Could not generate a room code. Try again.');
@@ -109,36 +115,9 @@ class HomeScreen extends StatelessWidget {
       if (!context.mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
 
-      await showDialog<void>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          backgroundColor: cardColor,
-          title: const Text('Your listening room is ready!'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('Share this code with your friends:'),
-              const SizedBox(height: 18),
-              SelectableText(
-                code,
-                style: const TextStyle(
-                  color: accentColor,
-                  fontSize: 32,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 5,
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text(
-                'Done',
-                style: TextStyle(color: accentColor),
-              ),
-            ),
-          ],
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => RoomScreen(roomCode: code),
         ),
       );
     } catch (error) {
@@ -149,6 +128,120 @@ class HomeScreen extends StatelessWidget {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Could not create room: $error'),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    }
+  }
+
+  Future<void> _handleJoinRoom(BuildContext context) async {
+    final codeController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    final code = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: cardColor,
+        title: const Text('Join a listening room'),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: codeController,
+            autofocus: true,
+            maxLength: 6,
+            textCapitalization: TextCapitalization.characters,
+            autocorrect: false,
+            style: const TextStyle(
+              letterSpacing: 4,
+              fontWeight: FontWeight.bold,
+            ),
+            decoration: const InputDecoration(
+              labelText: 'Room code',
+              hintText: 'ABC123',
+              counterText: '',
+            ),
+            validator: (value) {
+              final normalized = (value ?? '').trim().toUpperCase();
+              if (!RegExp(r'^[A-Z0-9]{6}$').hasMatch(normalized)) {
+                return 'Enter a valid 6-character code.';
+              }
+              return null;
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(
+                  dialogContext,
+                  codeController.text.trim().toUpperCase(),
+                );
+              }
+            },
+            child: const Text('Join'),
+          ),
+        ],
+      ),
+    );
+
+    codeController.dispose();
+
+    if (code == null || !context.mounted) return;
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: CircularProgressIndicator(color: accentColor),
+      ),
+    );
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw Exception('You are not signed in. Restart the app.');
+      }
+
+      final db = FirebaseFirestore.instance;
+      final roomRef = db.collection('rooms').doc(code);
+      final roomSnapshot = await roomRef.get();
+
+      if (!roomSnapshot.exists ||
+          roomSnapshot.data()?['status'] != 'active') {
+        throw Exception('Room not found or no longer active.');
+      }
+
+      final memberRef = roomRef.collection('members').doc(user.uid);
+      final existingMember = await memberRef.get();
+
+      if (!existingMember.exists) {
+        await memberRef.set({
+          'uid': user.uid,
+          'joinedAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => RoomScreen(roomCode: code),
+        ),
+      );
+    } catch (error) {
+      if (!context.mounted) return;
+
+      Navigator.of(context, rootNavigator: true).pop();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not join room: $error'),
           duration: const Duration(seconds: 6),
         ),
       );
@@ -254,15 +347,7 @@ class HomeScreen extends StatelessWidget {
                 width: double.infinity,
                 height: 58,
                 child: OutlinedButton.icon(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'Joining rooms is coming in the next step!',
-                        ),
-                      ),
-                    );
-                  },
+                  onPressed: () => _handleJoinRoom(context),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.white,
                     side: const BorderSide(color: Colors.white24),
@@ -322,6 +407,186 @@ class HomeScreen extends StatelessWidget {
               const SizedBox(height: 12),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class RoomScreen extends StatelessWidget {
+  final String roomCode;
+
+  const RoomScreen({
+    super.key,
+    required this.roomCode,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final db = FirebaseFirestore.instance;
+    final user = FirebaseAuth.instance.currentUser;
+    final roomRef = db.collection('rooms').doc(roomCode);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Listening room'),
+        backgroundColor: bgColor,
+      ),
+      body: SafeArea(
+        child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: roomRef.snapshots(),
+          builder: (context, roomSnapshot) {
+            if (roomSnapshot.hasError) {
+              return const Center(
+                child: Text('Could not load this room.'),
+              );
+            }
+
+            if (!roomSnapshot.hasData) {
+              return const Center(
+                child: CircularProgressIndicator(color: accentColor),
+              );
+            }
+
+            final roomData = roomSnapshot.data!.data();
+            if (roomData == null) {
+              return const Center(child: Text('This room no longer exists.'));
+            }
+
+            final creatorUid = roomData['creatorUid'] as String?;
+
+            return ListView(
+              padding: const EdgeInsets.all(24),
+              children: [
+                const Icon(
+                  Icons.headphones_rounded,
+                  color: accentColor,
+                  size: 54,
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'YOU ARE IN SYNC',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: accentColor,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 3,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Share the code with your friends',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white60),
+                ),
+                const SizedBox(height: 16),
+                Center(
+                  child: SelectableText(
+                    roomCode,
+                    style: const TextStyle(
+                      color: accentColor,
+                      fontSize: 36,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 6,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 30),
+                Row(
+                  children: [
+                    const Icon(Icons.people_alt_rounded, color: accentColor),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'People in this room',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                  stream: roomRef.collection('members').snapshots(),
+                  builder: (context, membersSnapshot) {
+                    if (membersSnapshot.hasError) {
+                      return const Card(
+                        child: Padding(
+                          padding: EdgeInsets.all(16),
+                          child: Text(
+                            'Unable to load members. Check your Firestore rules.',
+                          ),
+                        ),
+                      );
+                    }
+
+                    if (!membersSnapshot.hasData) {
+                      return const Center(
+                        child: CircularProgressIndicator(
+                          color: accentColor,
+                        ),
+                      );
+                    }
+
+                    final members = membersSnapshot.data!.docs;
+
+                    return Container(
+                      decoration: BoxDecoration(
+                        color: cardColor,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: Column(
+                        children: [
+                          for (var i = 0; i < members.length; i++)
+                            ListTile(
+                              leading: CircleAvatar(
+                                backgroundColor:
+                                    accentColor.withValues(alpha: 0.15),
+                                child: Icon(
+                                  members[i].id == creatorUid
+                                      ? Icons.star_rounded
+                                      : Icons.person_rounded,
+                                  color: accentColor,
+                                ),
+                              ),
+                              title: Text(
+                                members[i].id == user?.uid
+                                    ? 'You'
+                                    : 'Listener ${members[i].id.substring(0, min(6, members[i].id.length))}',
+                              ),
+                              subtitle: members[i].id == creatorUid
+                                  ? const Text('Room host')
+                                  : null,
+                              trailing: members[i].id == user?.uid
+                                  ? const Text(
+                                      'YOU',
+                                      style: TextStyle(
+                                        color: accentColor,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    )
+                                  : null,
+                              dense: true,
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 24),
+                const Center(
+                  child: Text(
+                    'Member list updates automatically.',
+                    style: TextStyle(color: Colors.white38, fontSize: 12),
+                  ),
+                ),
+              ],
+            );
+          },
         ),
       ),
     );
