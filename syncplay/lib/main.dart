@@ -47,8 +47,23 @@ class SyncPlayApp extends StatelessWidget {
   }
 }
 
-class HomeScreen extends StatelessWidget {
+// In-memory favourites for the current app session.
+const String demoSongId = 'demo_track';
+bool demoTrackIsFavourite = false;
+
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  Future<void> _openFavourites() async {
+    await Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const FavouritesScreen()));
+    if (mounted) setState(() {});
+  }
 
   String _generateRoomCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -272,6 +287,14 @@ class HomeScreen extends StatelessWidget {
                     ),
                   ),
                   const Spacer(),
+                  IconButton(
+                    tooltip: 'Favourites',
+                    onPressed: _openFavourites,
+                    icon: const Icon(
+                      Icons.favorite_rounded,
+                      color: accentColor,
+                    ),
+                  ),
                   const Icon(
                     Icons.headphones_rounded,
                     color: accentColor,
@@ -392,6 +415,82 @@ class HomeScreen extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class FavouritesScreen extends StatefulWidget {
+  const FavouritesScreen({super.key});
+
+  @override
+  State<FavouritesScreen> createState() => _FavouritesScreenState();
+}
+
+class _FavouritesScreenState extends State<FavouritesScreen> {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Favourites'), backgroundColor: bgColor),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: demoTrackIsFavourite
+            ? Container(
+                decoration: BoxDecoration(
+                  color: cardColor,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.white10),
+                ),
+                child: ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Color(0x2219F35A),
+                    child: Icon(Icons.music_note_rounded, color: accentColor),
+                  ),
+                  title: const Text(
+                    'Demo Track',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: const Text('SyncPlay demo audio'),
+                  trailing: IconButton(
+                    tooltip: 'Remove from favourites',
+                    icon: const Icon(
+                      Icons.favorite_rounded,
+                      color: accentColor,
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        demoTrackIsFavourite = false;
+                      });
+                    },
+                  ),
+                ),
+              )
+            : const Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.favorite_border_rounded,
+                      size: 52,
+                      color: Colors.white38,
+                    ),
+                    SizedBox(height: 12),
+                    Text(
+                      'No favourites yet',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    SizedBox(height: 6),
+                    Text(
+                      'Tap the heart beside a song to save it here.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white60),
+                    ),
+                  ],
+                ),
+              ),
       ),
     );
   }
@@ -765,12 +864,41 @@ class _RoomScreenState extends State<RoomScreen> {
                             ),
                           ),
                           const SizedBox(height: 8),
-                          const Text(
-                            'Demo Track',
-                            style: TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                            ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Flexible(
+                                child: Text(
+                                  'Demo Track',
+                                  style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: demoTrackIsFavourite
+                                    ? 'Remove from favourites'
+                                    : 'Add to favourites',
+                                onPressed: () {
+                                  setState(() {
+                                    demoTrackIsFavourite =
+                                        !demoTrackIsFavourite;
+                                  });
+                                  _showMessage(
+                                    demoTrackIsFavourite
+                                        ? 'Added to favourites'
+                                        : 'Removed from favourites',
+                                  );
+                                },
+                                icon: Icon(
+                                  demoTrackIsFavourite
+                                      ? Icons.favorite_rounded
+                                      : Icons.favorite_border_rounded,
+                                  color: accentColor,
+                                ),
+                              ),
+                            ],
                           ),
                           const SizedBox(height: 8),
                           if (_audioError != null)
