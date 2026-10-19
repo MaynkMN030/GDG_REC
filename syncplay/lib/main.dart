@@ -25,6 +25,59 @@ const Color bgColor = Color(0xFF0D0D12);
 const Color cardColor = Color(0xFF191922);
 const Color accentColor = Color(0xFFB8F35A);
 
+class Song {
+  final String id;
+  final String title;
+  final String artist;
+  final String assetPath;
+  final String? artworkAsset;
+
+  const Song({
+    required this.id,
+    required this.title,
+    required this.artist,
+    required this.assetPath,
+    this.artworkAsset,
+  });
+}
+
+// Add more Song entries here after placing their audio files in assets/audio/.
+const List<Song> musicLibrary = [
+  Song(
+    id: 'demo_track',
+    title: 'Demo Track',
+    artist: 'SyncPlay demo audio',
+    assetPath: 'assets/audio/demo.mp3',
+  ),
+  Song(
+    id: 'track_1',
+    title: 'Track 1',
+    artist: 'Unknown Artist',
+    assetPath: 'assets/audio/track_1.mp3',
+  ),
+  Song(
+    id: 'track_2',
+    title: 'Track 2',
+    artist: 'Unknown Artist',
+    assetPath: 'assets/audio/track_2.mp3',
+  ),
+  Song(
+    id: 'track_3',
+    title: 'Track 3',
+    artist: 'Unknown Artist',
+    assetPath: 'assets/audio/track_3.mp3',
+  ),
+];
+
+final Set<String> favouriteSongIds = <String>{};
+
+Song songById(String? id) {
+  for (final song in musicLibrary) {
+    if (song.id == id) return song;
+  }
+  return musicLibrary.first;
+}
+
 class SyncPlayApp extends StatelessWidget {
   const SyncPlayApp({super.key});
 
@@ -47,9 +100,7 @@ class SyncPlayApp extends StatelessWidget {
   }
 }
 
-// In-memory favourites for the current app session.
-const String demoSongId = 'demo_track';
-bool demoTrackIsFavourite = false;
+// Favourites are kept in memory for the current app session.
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -65,6 +116,19 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) setState(() {});
   }
 
+  Future<void> _openLibrary() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => MusicLibraryScreen(
+          onSongSelected: (song) async {
+            Navigator.of(context).pop();
+            await _handleCreateRoom(context, song: song);
+          },
+        ),
+      ),
+    );
+  }
+
   String _generateRoomCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     final random = Random.secure();
@@ -72,7 +136,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return List.generate(6, (_) => chars[random.nextInt(chars.length)]).join();
   }
 
-  Future<String> _createRoom() async {
+  Future<String> _createRoom({Song? initialSong}) async {
     final user = FirebaseAuth.instance.currentUser;
 
     if (user == null) {
@@ -95,6 +159,7 @@ class _HomeScreenState extends State<HomeScreen> {
           'creatorUid': user.uid,
           'createdAt': FieldValue.serverTimestamp(),
           'status': 'active',
+          'roomName': 'Listening room',
         });
 
         return true;
@@ -107,6 +172,18 @@ class _HomeScreenState extends State<HomeScreen> {
         'uid': user.uid,
         'joinedAt': FieldValue.serverTimestamp(),
       });
+      final selectedSong = initialSong ?? musicLibrary.first;
+      debugPrint(
+        'Creating room playback state: songId=${selectedSong.id}, '
+        'asset=${selectedSong.assetPath}',
+      );
+      await roomRef.collection('playback').doc('state').set({
+        'songId': selectedSong.id,
+        'isPlaying': false,
+        'positionMs': 0,
+        'updatedAt': FieldValue.serverTimestamp(),
+        'updatedBy': user.uid,
+      });
 
       return code;
     }
@@ -114,7 +191,7 @@ class _HomeScreenState extends State<HomeScreen> {
     throw Exception('Could not generate a room code. Try again.');
   }
 
-  Future<void> _handleCreateRoom(BuildContext context) async {
+  Future<void> _handleCreateRoom(BuildContext context, {Song? song}) async {
     showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -123,13 +200,19 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     try {
-      final code = await _createRoom();
+      final code = await _createRoom(initialSong: song);
 
       if (!context.mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
 
-      Navigator.of(context)
-          .push(MaterialPageRoute(builder: (_) => RoomScreen(roomCode: code)));
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => RoomScreen(
+            roomCode: code,
+            initialSongId: (song ?? musicLibrary.first).id,
+          ),
+        ),
+      );
     } catch (error) {
       if (!context.mounted) return;
 
@@ -295,6 +378,14 @@ class _HomeScreenState extends State<HomeScreen> {
                       color: accentColor,
                     ),
                   ),
+                  IconButton(
+                    tooltip: 'Music library',
+                    onPressed: _openLibrary,
+                    icon: const Icon(
+                      Icons.library_music_rounded,
+                      color: accentColor,
+                    ),
+                  ),
                   const Icon(
                     Icons.headphones_rounded,
                     color: accentColor,
@@ -420,86 +511,158 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-class FavouritesScreen extends StatefulWidget {
+class MusicLibraryScreen extends StatefulWidget {
+  final Future<void> Function(Song song) onSongSelected;
+  final bool favouritesOnly;
+
+  const MusicLibraryScreen({
+    super.key,
+    required this.onSongSelected,
+    this.favouritesOnly = false,
+  });
+
+  @override
+  State<MusicLibraryScreen> createState() => _MusicLibraryScreenState();
+}
+
+class _MusicLibraryScreenState extends State<MusicLibraryScreen> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final songs = musicLibrary.where((song) {
+      final matchesQuery = ('${song.title} ${song.artist}')
+          .toLowerCase()
+          .contains(_query.toLowerCase());
+      final matchesFavourites =
+          !widget.favouritesOnly || favouriteSongIds.contains(song.id);
+      return matchesQuery && matchesFavourites;
+    }).toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.favouritesOnly ? 'Favourites' : 'Music library'),
+        backgroundColor: bgColor,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            TextField(
+              onChanged: (value) => setState(() => _query = value),
+              decoration: InputDecoration(
+                hintText: 'Search songs or artists',
+                prefixIcon: const Icon(Icons.search_rounded),
+                filled: true,
+                fillColor: cardColor,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: songs.isEmpty
+                  ? Center(
+                      child: Text(
+                        widget.favouritesOnly
+                            ? 'No favourites yet'
+                            : 'No songs found',
+                        style: const TextStyle(color: Colors.white60),
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: songs.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final song = songs[index];
+                        final isFavourite = favouriteSongIds.contains(song.id);
+                        return Container(
+                          decoration: BoxDecoration(
+                            color: cardColor,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.white10),
+                          ),
+                          child: ListTile(
+                            leading: const CircleAvatar(
+                              backgroundColor: Color(0x2219F35A),
+                              child: Icon(
+                                Icons.music_note_rounded,
+                                color: accentColor,
+                              ),
+                            ),
+                            title: Text(
+                              song.title,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            subtitle: Text(song.artist),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  tooltip: isFavourite
+                                      ? 'Remove from favourites'
+                                      : 'Add to favourites',
+                                  onPressed: () => setState(() {
+                                    if (isFavourite) {
+                                      favouriteSongIds.remove(song.id);
+                                    } else {
+                                      favouriteSongIds.add(song.id);
+                                    }
+                                  }),
+                                  icon: Icon(
+                                    isFavourite
+                                        ? Icons.favorite_rounded
+                                        : Icons.favorite_border_rounded,
+                                    color: accentColor,
+                                  ),
+                                ),
+                                const Icon(
+                                  Icons.play_circle_fill_rounded,
+                                  color: accentColor,
+                                  size: 30,
+                                ),
+                              ],
+                            ),
+                            onTap: () => widget.onSongSelected(song),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class FavouritesScreen extends StatelessWidget {
   const FavouritesScreen({super.key});
 
   @override
-  State<FavouritesScreen> createState() => _FavouritesScreenState();
-}
-
-class _FavouritesScreenState extends State<FavouritesScreen> {
-  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Favourites'), backgroundColor: bgColor),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: demoTrackIsFavourite
-            ? Container(
-                decoration: BoxDecoration(
-                  color: cardColor,
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: ListTile(
-                  leading: const CircleAvatar(
-                    backgroundColor: Color(0x2219F35A),
-                    child: Icon(Icons.music_note_rounded, color: accentColor),
-                  ),
-                  title: const Text(
-                    'Demo Track',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: const Text('SyncPlay demo audio'),
-                  trailing: IconButton(
-                    tooltip: 'Remove from favourites',
-                    icon: const Icon(
-                      Icons.favorite_rounded,
-                      color: accentColor,
-                    ),
-                    onPressed: () {
-                      setState(() {
-                        demoTrackIsFavourite = false;
-                      });
-                    },
-                  ),
-                ),
-              )
-            : const Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.favorite_border_rounded,
-                      size: 52,
-                      color: Colors.white38,
-                    ),
-                    SizedBox(height: 12),
-                    Text(
-                      'No favourites yet',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    SizedBox(height: 6),
-                    Text(
-                      'Tap the heart beside a song to save it here.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white60),
-                    ),
-                  ],
-                ),
-              ),
-      ),
+    return MusicLibraryScreen(
+      favouritesOnly: true,
+      onSongSelected: (song) async {
+        Navigator.of(context).pop();
+      },
     );
   }
 }
 
 class RoomScreen extends StatefulWidget {
   final String roomCode;
+  final String initialSongId;
 
-  const RoomScreen({super.key, required this.roomCode});
+  const RoomScreen({
+    super.key,
+    required this.roomCode,
+    this.initialSongId = 'demo_track',
+  });
 
   @override
   State<RoomScreen> createState() => _RoomScreenState();
@@ -507,6 +670,13 @@ class RoomScreen extends StatefulWidget {
 
 class _RoomScreenState extends State<RoomScreen> {
   final AudioPlayer _player = AudioPlayer();
+  late String _currentSongId;
+  late String _requestedSongId;
+
+  // Serialize asset changes. Two setAsset calls running at the same time can
+  // otherwise finish out of order (for example, demo.mp3 replacing track_1).
+  Future<void> _songLoadQueue = Future<void>.value();
+  int _assetLoadGeneration = 0;
 
   late final DocumentReference<Map<String, dynamic>> _roomRef;
   late final DocumentReference<Map<String, dynamic>> _playbackRef;
@@ -516,6 +686,8 @@ class _RoomScreenState extends State<RoomScreen> {
   bool _audioReady = false;
   bool _isApplyingRemoteChange = false;
   bool _isWritingPlayback = false;
+  String? _pendingLocalSongId;
+  int _localSongSelectionGeneration = 0;
   String? _audioError;
 
   Timer? _syncTimer;
@@ -528,6 +700,8 @@ class _RoomScreenState extends State<RoomScreen> {
   @override
   void initState() {
     super.initState();
+    _currentSongId = widget.initialSongId;
+    _requestedSongId = widget.initialSongId;
 
     _roomRef = FirebaseFirestore.instance
         .collection('rooms')
@@ -545,27 +719,103 @@ class _RoomScreenState extends State<RoomScreen> {
   }
 
   Future<void> _loadAudio() async {
-    try {
-      await _player.setAsset('assets/audio/demo.mp3');
-
-      if (mounted) {
-        setState(() {
-          _audioReady = true;
-          _audioError = null;
-        });
-
-        // The first Firestore snapshot may arrive before the audio finishes
-        // loading. Apply the cached shared state now that the player is ready.
-        await _applyLatestSharedState();
-      }
-    } catch (error) {
-      if (mounted) {
-        setState(() {
-          _audioError = 'Could not load demo.mp3: $error';
-        });
-      }
+    final loaded = await _loadSongAsset(_requestedSongId);
+    if (loaded) {
+      // A Firestore snapshot may arrive before the first asset finishes
+      // loading. Apply the latest shared timeline after audio becomes ready.
+      await _applyLatestSharedState();
     }
   }
+
+  
+Future<bool> _loadSongAsset(String songId) {
+  final song = songById(songId);
+  final generation = ++_assetLoadGeneration;
+  _requestedSongId = song.id;
+
+  debugPrint(
+    'REQUESTED SONG: ${song.id} | FILE: ${song.assetPath} '
+    '| GENERATION: $generation',
+  );
+
+  if (mounted) {
+    setState(() {
+      _audioReady = false;
+      _audioError = null;
+    });
+  }
+
+  final completer = Completer<bool>();
+
+  _songLoadQueue = _songLoadQueue.catchError((Object _) {}).then((_) async {
+    if (!mounted || generation != _assetLoadGeneration) {
+      debugPrint('SKIPPED STALE LOAD: ${song.id}');
+      completer.complete(false);
+      return;
+    }
+
+    try {
+      // Stop the previous track before replacing its source.
+      await _player.stop();
+
+      if (!mounted || generation != _assetLoadGeneration) {
+        completer.complete(false);
+        return;
+      }
+
+      debugPrint('LOADING EXACT FILE: ${song.assetPath}');
+
+      // Explicitly construct a new asset source for the selected song.
+      final duration = await _player.setAudioSource(
+        AudioSource.asset(song.assetPath),
+        preload: true,
+      );
+
+      if (!mounted || generation != _assetLoadGeneration) {
+        debugPrint('DISCARDED STALE RESULT: ${song.id}');
+        completer.complete(false);
+        return;
+      }
+
+      await _player.seek(Duration.zero);
+
+      if (!mounted || generation != _assetLoadGeneration) {
+        completer.complete(false);
+        return;
+      }
+
+      setState(() {
+        _currentSongId = song.id;
+        _audioReady = true;
+        _audioError = null;
+      });
+
+      debugPrint(
+        'LOADED SUCCESSFULLY: ${song.id} | ${song.assetPath} '
+        '| DURATION: $duration | PLAYER DURATION: ${_player.duration}',
+      );
+
+      completer.complete(true);
+    } catch (error, stackTrace) {
+      debugPrint('FAILED TO LOAD: ${song.assetPath}');
+      debugPrint('ERROR: $error');
+      debugPrint('$stackTrace');
+
+      if (mounted && generation == _assetLoadGeneration) {
+        setState(() {
+          _audioReady = false;
+          _audioError =
+              'Failed to load ${song.title}: ${song.assetPath}\n$error';
+        });
+      }
+
+      completer.complete(false);
+    }
+  });
+
+  return completer.future;
+}
+
 
   void _listenForRemotePlayback() {
     _playbackSubscription = _playbackRef.snapshots().listen(
@@ -579,6 +829,30 @@ class _RoomScreenState extends State<RoomScreen> {
         if (positionMs is! int) return;
 
         final isPlaying = data['isPlaying'] == true;
+        final incomingSongId = data['songId'] as String?;
+        debugPrint('Firestore playback received songId=$incomingSongId');
+        final currentUser = FirebaseAuth.instance.currentUser;
+        if (data['updatedBy'] == currentUser?.uid) {
+          debugPrint(
+            'Ignoring own Firestore snapshot before audio loading: '
+            'songId=$incomingSongId',
+          );
+          return;
+        }
+        if (_pendingLocalSongId != null &&
+            incomingSongId != _pendingLocalSongId) {
+          debugPrint(
+            'Ignored stale Firestore songId=$incomingSongId while local '
+            'songId=$_pendingLocalSongId is loading',
+          );
+          return;
+        }
+        if (incomingSongId != null &&
+            incomingSongId != _requestedSongId &&
+            musicLibrary.any((song) => song.id == incomingSongId)) {
+          final loaded = await _loadSongAsset(incomingSongId);
+          if (!loaded) return;
+        }
         final updatedAtValue = data['updatedAt'];
         DateTime? updatedAt;
         if (updatedAtValue is Timestamp) {
@@ -593,9 +867,6 @@ class _RoomScreenState extends State<RoomScreen> {
         // Keep the latest state even if the audio is still loading. The
         // audio-ready callback will apply it after setAsset completes.
         if (!_audioReady) return;
-
-        final currentUser = FirebaseAuth.instance.currentUser;
-        if (data['updatedBy'] == currentUser?.uid) return;
 
         await _applyLatestSharedState();
       },
@@ -705,7 +976,12 @@ class _RoomScreenState extends State<RoomScreen> {
       _sharedUpdatedAt = DateTime.now();
       _hasSharedState = true;
 
+      debugPrint(
+        'Writing playback state: songId=$_currentSongId, '
+        'isPlaying=$nextIsPlaying, positionMs=$positionMs',
+      );
       await _playbackRef.set({
+        'songId': _currentSongId,
         'isPlaying': nextIsPlaying,
         'positionMs': positionMs,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -736,7 +1012,11 @@ class _RoomScreenState extends State<RoomScreen> {
     _hasSharedState = true;
 
     try {
+      debugPrint(
+        'Writing seek state: songId=$_currentSongId, positionMs=$positionMs',
+      );
       await _playbackRef.set({
+        'songId': _currentSongId,
         'isPlaying': _player.playing,
         'positionMs': positionMs,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -745,6 +1025,70 @@ class _RoomScreenState extends State<RoomScreen> {
     } catch (error) {
       _showMessage('Could not sync seek: $error');
     }
+  }
+
+  Future<void> _changeSong(Song song) async {
+    if (song.id == _requestedSongId && _audioReady) return;
+    final selectionGeneration = ++_localSongSelectionGeneration;
+    _pendingLocalSongId = song.id;
+    debugPrint(
+      'Local song selected: songId=${song.id}, asset=${song.assetPath}, '
+      'selectionGeneration=$selectionGeneration',
+    );
+    final wasPlaying = _player.playing;
+
+    try {
+      final loaded = await _loadSongAsset(song.id);
+      if (!loaded) {
+        if (_audioError != null) _showMessage(_audioError!);
+        return;
+      }
+      if (selectionGeneration != _localSongSelectionGeneration) {
+        debugPrint(
+          'Ignored stale local song selection: songId=${song.id}, '
+          'selectionGeneration=$selectionGeneration, '
+          'latestSelectionGeneration=$_localSongSelectionGeneration',
+        );
+        return;
+      }
+
+      final user = FirebaseAuth.instance.currentUser;
+      debugPrint(
+        'Writing selected song to Firestore: songId=${song.id}, '
+        'asset=${song.assetPath}, selectionGeneration=$selectionGeneration',
+      );
+      await _playbackRef.set({
+        'songId': song.id,
+        'isPlaying': wasPlaying,
+        'positionMs': 0,
+        'updatedAt': FieldValue.serverTimestamp(),
+        'updatedBy': user?.uid,
+      });
+      _sharedPositionMs = 0;
+      _sharedIsPlaying = wasPlaying;
+      _sharedUpdatedAt = DateTime.now();
+      _hasSharedState = true;
+      if (wasPlaying) await _player.play();
+      if (mounted) setState(() {});
+    } catch (error) {
+      _showMessage('Could not sync the selected song: $error');
+    } finally {
+      if (selectionGeneration == _localSongSelectionGeneration) {
+        _pendingLocalSongId = null;
+      }
+    }
+  }
+
+  Future<void> _openRoomLibrary() async {
+    final song = await Navigator.of(context).push<Song>(
+      MaterialPageRoute(
+        builder: (libraryContext) => MusicLibraryScreen(
+          onSongSelected: (selected) async =>
+              Navigator.of(libraryContext).pop(selected),
+        ),
+      ),
+    );
+    if (song != null) await _changeSong(song);
   }
 
   void _showMessage(String message) {
@@ -867,9 +1211,9 @@ class _RoomScreenState extends State<RoomScreen> {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              const Flexible(
+                              Flexible(
                                 child: Text(
-                                  'Demo Track',
+                                  songById(_currentSongId).title,
                                   style: TextStyle(
                                     fontSize: 22,
                                     fontWeight: FontWeight.bold,
@@ -877,28 +1221,46 @@ class _RoomScreenState extends State<RoomScreen> {
                                 ),
                               ),
                               IconButton(
-                                tooltip: demoTrackIsFavourite
+                                tooltip:
+                                    favouriteSongIds.contains(_currentSongId)
                                     ? 'Remove from favourites'
                                     : 'Add to favourites',
                                 onPressed: () {
                                   setState(() {
-                                    demoTrackIsFavourite =
-                                        !demoTrackIsFavourite;
+                                    if (favouriteSongIds.contains(
+                                      _currentSongId,
+                                    )) {
+                                      favouriteSongIds.remove(_currentSongId);
+                                    } else {
+                                      favouriteSongIds.add(_currentSongId);
+                                    }
                                   });
                                   _showMessage(
-                                    demoTrackIsFavourite
+                                    favouriteSongIds.contains(_currentSongId)
                                         ? 'Added to favourites'
                                         : 'Removed from favourites',
                                   );
                                 },
                                 icon: Icon(
-                                  demoTrackIsFavourite
+                                  favouriteSongIds.contains(_currentSongId)
                                       ? Icons.favorite_rounded
                                       : Icons.favorite_border_rounded,
                                   color: accentColor,
                                 ),
                               ),
+                              IconButton(
+                                tooltip: 'Change song',
+                                onPressed: _openRoomLibrary,
+                                icon: const Icon(
+                                  Icons.queue_music_rounded,
+                                  color: accentColor,
+                                ),
+                              ),
                             ],
+                          ),
+                          Text(
+                            songById(_currentSongId).artist,
+                            style: const TextStyle(color: Colors.white60),
                           ),
                           const SizedBox(height: 8),
                           if (_audioError != null)
