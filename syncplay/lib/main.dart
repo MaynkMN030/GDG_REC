@@ -136,7 +136,10 @@ class _HomeScreenState extends State<HomeScreen> {
     return List.generate(6, (_) => chars[random.nextInt(chars.length)]).join();
   }
 
-  Future<String> _createRoom({Song? initialSong}) async {
+  Future<String> _createRoom({
+    Song? initialSong,
+    required String roomName,
+  }) async {
     final user = FirebaseAuth.instance.currentUser;
 
     if (user == null) {
@@ -159,7 +162,7 @@ class _HomeScreenState extends State<HomeScreen> {
           'creatorUid': user.uid,
           'createdAt': FieldValue.serverTimestamp(),
           'status': 'active',
-          'roomName': 'Listening room',
+          'roomName': roomName,
         });
 
         return true;
@@ -172,13 +175,8 @@ class _HomeScreenState extends State<HomeScreen> {
         'uid': user.uid,
         'joinedAt': FieldValue.serverTimestamp(),
       });
-      final selectedSong = initialSong ?? musicLibrary.first;
-      debugPrint(
-        'Creating room playback state: songId=${selectedSong.id}, '
-        'asset=${selectedSong.assetPath}',
-      );
       await roomRef.collection('playback').doc('state').set({
-        'songId': selectedSong.id,
+        'songId': (initialSong ?? musicLibrary.first).id,
         'isPlaying': false,
         'positionMs': 0,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -192,6 +190,54 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _handleCreateRoom(BuildContext context, {Song? song}) async {
+    final nameController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    final roomName = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: cardColor,
+        title: const Text('Create a listening room'),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: nameController,
+            autofocus: true,
+            maxLength: 40,
+            textCapitalization: TextCapitalization.words,
+            decoration: const InputDecoration(
+              labelText: 'Room name',
+              hintText: 'e.g. Late Night Vibes',
+              counterText: '',
+            ),
+            validator: (value) {
+              if ((value ?? '').trim().isEmpty) {
+                return 'Please enter a room name.';
+              }
+              return null;
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(dialogContext, nameController.text.trim());
+              }
+            },
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+
+    nameController.dispose();
+    if (roomName == null || !context.mounted) return;
+
     showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -200,7 +246,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     try {
-      final code = await _createRoom(initialSong: song);
+      final code = await _createRoom(initialSong: song, roomName: roomName);
 
       if (!context.mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
@@ -574,7 +620,7 @@ class _MusicLibraryScreenState extends State<MusicLibraryScreen> {
                     )
                   : ListView.separated(
                       itemCount: songs.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 10),
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
                       itemBuilder: (context, index) {
                         final song = songs[index];
                         final isFavourite = favouriteSongIds.contains(song.id);
@@ -686,8 +732,6 @@ class _RoomScreenState extends State<RoomScreen> {
   bool _audioReady = false;
   bool _isApplyingRemoteChange = false;
   bool _isWritingPlayback = false;
-  String? _pendingLocalSongId;
-  int _localSongSelectionGeneration = 0;
   String? _audioError;
 
   Timer? _syncTimer;
@@ -727,95 +771,86 @@ class _RoomScreenState extends State<RoomScreen> {
     }
   }
 
-  
-Future<bool> _loadSongAsset(String songId) {
-  final song = songById(songId);
-  final generation = ++_assetLoadGeneration;
-  _requestedSongId = song.id;
+  Future<bool> _loadSongAsset(String songId) {
+    final song = songById(songId);
+    final generation = ++_assetLoadGeneration;
+    _requestedSongId = song.id;
 
-  debugPrint(
-    'REQUESTED SONG: ${song.id} | FILE: ${song.assetPath} '
-    '| GENERATION: $generation',
-  );
+    debugPrint(
+      'REQUESTED SONG: ${song.id} | FILE: ${song.assetPath} '
+      '| GENERATION: $generation',
+    );
 
-  if (mounted) {
-    setState(() {
-      _audioReady = false;
-      _audioError = null;
-    });
-  }
-
-  final completer = Completer<bool>();
-
-  _songLoadQueue = _songLoadQueue.catchError((Object _) {}).then((_) async {
-    if (!mounted || generation != _assetLoadGeneration) {
-      debugPrint('SKIPPED STALE LOAD: ${song.id}');
-      completer.complete(false);
-      return;
-    }
-
-    try {
-      // Stop the previous track before replacing its source.
-      await _player.stop();
-
-      if (!mounted || generation != _assetLoadGeneration) {
-        completer.complete(false);
-        return;
-      }
-
-      debugPrint('LOADING EXACT FILE: ${song.assetPath}');
-
-      // Explicitly construct a new asset source for the selected song.
-      final duration = await _player.setAudioSource(
-        AudioSource.asset(song.assetPath),
-        preload: true,
-      );
-
-      if (!mounted || generation != _assetLoadGeneration) {
-        debugPrint('DISCARDED STALE RESULT: ${song.id}');
-        completer.complete(false);
-        return;
-      }
-
-      await _player.seek(Duration.zero);
-
-      if (!mounted || generation != _assetLoadGeneration) {
-        completer.complete(false);
-        return;
-      }
-
+    if (mounted) {
       setState(() {
-        _currentSongId = song.id;
-        _audioReady = true;
+        _audioReady = false;
         _audioError = null;
       });
+    }
 
-      debugPrint(
-        'LOADED SUCCESSFULLY: ${song.id} | ${song.assetPath} '
-        '| DURATION: $duration | PLAYER DURATION: ${_player.duration}',
-      );
+    final completer = Completer<bool>();
 
-      completer.complete(true);
-    } catch (error, stackTrace) {
-      debugPrint('FAILED TO LOAD: ${song.assetPath}');
-      debugPrint('ERROR: $error');
-      debugPrint('$stackTrace');
-
-      if (mounted && generation == _assetLoadGeneration) {
-        setState(() {
-          _audioReady = false;
-          _audioError =
-              'Failed to load ${song.title}: ${song.assetPath}\n$error';
-        });
+    _songLoadQueue = _songLoadQueue.catchError((_) {}).then((_) async {
+      if (!mounted || generation != _assetLoadGeneration) {
+        completer.complete(false);
+        return;
       }
 
-      completer.complete(false);
-    }
-  });
+      try {
+        // Completely stop the previous song.
+        await _player.stop();
 
-  return completer.future;
-}
+        if (!mounted || generation != _assetLoadGeneration) {
+          completer.complete(false);
+          return;
+        }
 
+        debugPrint('LOADING EXACT FILE: ${song.assetPath}');
+
+        // Replace the audio source with the selected asset.
+        final duration = await _player.setAudioSource(
+          AudioSource.asset(song.assetPath),
+          preload: true,
+        );
+
+        if (!mounted || generation != _assetLoadGeneration) {
+          completer.complete(false);
+          return;
+        }
+
+        await _player.seek(Duration.zero);
+
+        setState(() {
+          _currentSongId = song.id;
+          _audioReady = true;
+          _audioError = null;
+        });
+
+        debugPrint(
+          'LOADED SUCCESSFULLY: ${song.id} | ${song.assetPath} '
+          '| DURATION: $duration',
+        );
+
+        completer.complete(true);
+      } catch (error, stackTrace) {
+        debugPrint('FAILED TO LOAD: ${song.assetPath}');
+        debugPrint('$error');
+        debugPrint('$stackTrace');
+
+        if (mounted && generation == _assetLoadGeneration) {
+          setState(() {
+            _audioReady = false;
+            _audioError =
+                'Failed to load ${song.title}: ${song.assetPath}\n$error';
+          });
+        }
+
+        completer.complete(false);
+      }
+    });
+
+    return completer.future;
+  }
 
   void _listenForRemotePlayback() {
     _playbackSubscription = _playbackRef.snapshots().listen(
@@ -830,23 +865,6 @@ Future<bool> _loadSongAsset(String songId) {
 
         final isPlaying = data['isPlaying'] == true;
         final incomingSongId = data['songId'] as String?;
-        debugPrint('Firestore playback received songId=$incomingSongId');
-        final currentUser = FirebaseAuth.instance.currentUser;
-        if (data['updatedBy'] == currentUser?.uid) {
-          debugPrint(
-            'Ignoring own Firestore snapshot before audio loading: '
-            'songId=$incomingSongId',
-          );
-          return;
-        }
-        if (_pendingLocalSongId != null &&
-            incomingSongId != _pendingLocalSongId) {
-          debugPrint(
-            'Ignored stale Firestore songId=$incomingSongId while local '
-            'songId=$_pendingLocalSongId is loading',
-          );
-          return;
-        }
         if (incomingSongId != null &&
             incomingSongId != _requestedSongId &&
             musicLibrary.any((song) => song.id == incomingSongId)) {
@@ -867,6 +885,9 @@ Future<bool> _loadSongAsset(String songId) {
         // Keep the latest state even if the audio is still loading. The
         // audio-ready callback will apply it after setAsset completes.
         if (!_audioReady) return;
+
+        final currentUser = FirebaseAuth.instance.currentUser;
+        if (data['updatedBy'] == currentUser?.uid) return;
 
         await _applyLatestSharedState();
       },
@@ -966,20 +987,23 @@ Future<bool> _loadSongAsset(String songId) {
 
     _isWritingPlayback = true;
 
+    final positionMs = _player.position.inMilliseconds.clamp(0, 1 << 31);
+    final nextIsPlaying = !currentlyPlaying;
+
+    _sharedPositionMs = positionMs;
+    _sharedIsPlaying = nextIsPlaying;
+    _sharedUpdatedAt = DateTime.now();
+    _hasSharedState = true;
+
     try {
-      final positionMs = _player.position.inMilliseconds.clamp(0, 1 << 31);
-      final nextIsPlaying = !currentlyPlaying;
+      // Apply the action locally immediately.
+      if (nextIsPlaying) {
+        unawaited(_player.play());
+      } else {
+        await _player.pause();
+      }
 
-      // Update our local timeline immediately, then publish it for the room.
-      _sharedPositionMs = positionMs;
-      _sharedIsPlaying = nextIsPlaying;
-      _sharedUpdatedAt = DateTime.now();
-      _hasSharedState = true;
-
-      debugPrint(
-        'Writing playback state: songId=$_currentSongId, '
-        'isPlaying=$nextIsPlaying, positionMs=$positionMs',
-      );
+      // Then synchronize the playback state with the room.
       await _playbackRef.set({
         'songId': _currentSongId,
         'isPlaying': nextIsPlaying,
@@ -987,12 +1011,6 @@ Future<bool> _loadSongAsset(String songId) {
         'updatedAt': FieldValue.serverTimestamp(),
         'updatedBy': user.uid,
       });
-
-      if (nextIsPlaying) {
-        await _player.play();
-      } else {
-        await _player.pause();
-      }
     } catch (error) {
       _showMessage('Playback failed: $error');
     } finally {
@@ -1012,9 +1030,6 @@ Future<bool> _loadSongAsset(String songId) {
     _hasSharedState = true;
 
     try {
-      debugPrint(
-        'Writing seek state: songId=$_currentSongId, positionMs=$positionMs',
-      );
       await _playbackRef.set({
         'songId': _currentSongId,
         'isPlaying': _player.playing,
@@ -1029,34 +1044,16 @@ Future<bool> _loadSongAsset(String songId) {
 
   Future<void> _changeSong(Song song) async {
     if (song.id == _requestedSongId && _audioReady) return;
-    final selectionGeneration = ++_localSongSelectionGeneration;
-    _pendingLocalSongId = song.id;
-    debugPrint(
-      'Local song selected: songId=${song.id}, asset=${song.assetPath}, '
-      'selectionGeneration=$selectionGeneration',
-    );
     final wasPlaying = _player.playing;
 
-    try {
-      final loaded = await _loadSongAsset(song.id);
-      if (!loaded) {
-        if (_audioError != null) _showMessage(_audioError!);
-        return;
-      }
-      if (selectionGeneration != _localSongSelectionGeneration) {
-        debugPrint(
-          'Ignored stale local song selection: songId=${song.id}, '
-          'selectionGeneration=$selectionGeneration, '
-          'latestSelectionGeneration=$_localSongSelectionGeneration',
-        );
-        return;
-      }
+    final loaded = await _loadSongAsset(song.id);
+    if (!loaded) {
+      if (_audioError != null) _showMessage(_audioError!);
+      return;
+    }
 
+    try {
       final user = FirebaseAuth.instance.currentUser;
-      debugPrint(
-        'Writing selected song to Firestore: songId=${song.id}, '
-        'asset=${song.assetPath}, selectionGeneration=$selectionGeneration',
-      );
       await _playbackRef.set({
         'songId': song.id,
         'isPlaying': wasPlaying,
@@ -1072,10 +1069,6 @@ Future<bool> _loadSongAsset(String songId) {
       if (mounted) setState(() {});
     } catch (error) {
       _showMessage('Could not sync the selected song: $error');
-    } finally {
-      if (selectionGeneration == _localSongSelectionGeneration) {
-        _pendingLocalSongId = null;
-      }
     }
   }
 
@@ -1112,7 +1105,20 @@ Future<bool> _loadSongAsset(String songId) {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Listening room'),
+        title: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: _roomRef.snapshots(),
+          builder: (context, snapshot) {
+            final data = snapshot.data?.data();
+            final name = data?['roomName'];
+            return Text(
+              name is String && name.trim().isNotEmpty
+                  ? name
+                  : 'Listening room',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            );
+          },
+        ),
         backgroundColor: bgColor,
       ),
       body: SafeArea(
