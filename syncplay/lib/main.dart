@@ -918,27 +918,34 @@ class _RoomScreenState extends State<RoomScreen> {
     await _applySharedState(positionMs: targetMs, isPlaying: _sharedIsPlaying);
   }
 
-  Future<void> _applySharedState({
-    required int positionMs,
-    required bool isPlaying,
-  }) async {
-    if (!_audioReady || _isApplyingRemoteChange) return;
+  
+Future<void> _applySharedState({
+  required int positionMs,
+  required bool isPlaying,
+}) async {
+  if (!_audioReady || _isApplyingRemoteChange) return;
 
-    try {
-      _isApplyingRemoteChange = true;
-      await _player.seek(Duration(milliseconds: positionMs));
+  _isApplyingRemoteChange = true;
 
-      if (isPlaying) {
-        await _player.play();
-      } else {
-        await _player.pause();
-      }
-    } catch (error) {
-      debugPrint('Could not apply remote playback: $error');
-    } finally {
-      _isApplyingRemoteChange = false;
+  try {
+    await _player.seek(Duration(milliseconds: positionMs));
+
+    if (isPlaying) {
+      // Don't wait for playback to finish before processing future updates.
+      unawaited(
+        _player.play().catchError((Object error) {
+          debugPrint('Remote play failed: $error');
+        }),
+      );
+    } else {
+      await _player.pause();
     }
+  } catch (error) {
+    debugPrint('Could not apply remote playback: $error');
+  } finally {
+    _isApplyingRemoteChange = false;
   }
+}
 
   Future<void> _correctPlaybackDrift() async {
     if (!_audioReady ||
